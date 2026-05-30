@@ -1,0 +1,8 @@
+{
+  "name": "flamesphp/c-ready-service",
+  "description": "Flames: Ready Service (C)",
+  "minimum-stability": "dev",
+  "prefer-stable": true,
+  "license": "MIT"
+}
+

@@ -1,0 +1,20 @@
+// config.w32 - Flames Ready PHP Extension - Windows build configuration
+//
+// Requirements: PHP 8.5+, Windows 10+, MSVC, PHP SDK
+//
+// Usage (from PHP SDK shell):
+//   buildconf
+//   configure --enable-cflames-ready-service
+//   nmake
+
+ARG_ENABLE("cflames-ready-service",
+           "Enable Flames Ready Service persistent worker extension", "no");
+
+if (PHP_CFLAMES_READY_SERVICE != "no") {
+    EXTENSION("cflames_ready_service",
+              "flames_ready.c flames_ready_fcgi.c",
+              PHP_CFLAMES_READY_SERVICE_SHARED);
+    AC_DEFINE("HAVE_FLAMES_READY", 1, "Flames Ready extension");
+    // WinSock2 is required for TCP socket support
+    ADD_EXTENSION_DEP("cflames_ready_service", "ws2_32");
+}
