@@ -58,6 +58,14 @@
 ZEND_DECLARE_MODULE_GLOBALS(flames_ready)
 
 /* =========================================================================
+ * Saved argv for exec-based supervisor reload (POSIX only)
+ * ========================================================================= */
+#ifndef _WIN32
+static char   fr_php_exe[4096] = "";
+static char **fr_exec_argv     = NULL;
+#endif
+
+/* =========================================================================
  * INI entries
  * ========================================================================= */
 
@@ -951,6 +959,24 @@ static void flames_ready_start(zval *handler, zval *return_value)
     }
     memset(pub, 0, sizeof(fr_named_shm_t));
 
+    /* Save PHP binary + argv so we can exec() ourselves on reload */
+    if (fr_exec_argv == NULL) {
+        ssize_t exelen = readlink("/proc/self/exe",
+                                  fr_php_exe, sizeof(fr_php_exe) - 1);
+        if (exelen > 0) fr_php_exe[exelen] = '\0';
+
+        int    sargc = SG(request_info).argc;
+        char **sargv = SG(request_info).argv;
+        /* build: [ php_binary, sargv[0], sargv[1], ..., NULL ] */
+        fr_exec_argv = malloc((sargc + 2) * sizeof(char *));
+        if (fr_exec_argv) {
+            fr_exec_argv[0] = strdup(fr_php_exe[0] ? fr_php_exe : "php");
+            for (int i = 0; i < sargc; i++)
+                fr_exec_argv[i + 1] = strdup(sargv ? sargv[i] : "");
+            fr_exec_argv[sargc + 1] = NULL;
+        }
+    }
+
     /* Determine worker count */
     int num_workers = (int)FLAMES_READY_G(workers);
     if (num_workers <= 0) {
@@ -1025,13 +1051,56 @@ static void flames_ready_start(zval *handler, zval *return_value)
         sleep(1);
         time_t now = time(NULL);
 
-        /* Propagate reload requests written by external processes */
+        /* Reload requested by external process – re-exec supervisor so workers
+         * start as fresh PHP processes and pick up changed source files.       */
         if (pub->reload_gen != shdr->reload_gen) {
-            shdr->reload_gen = pub->reload_gen;
+            uint32_t new_gen = pub->reload_gen;
             fprintf(stderr,
-                "[Flames Ready] supervisor propagated external reload (gen→%u)\n",
-                shdr->reload_gen);
+                "[Flames Ready] reload gen→%u – killing workers and re-exec\n",
+                new_gen);
             fflush(stderr);
+
+            /* Signal all workers to exit */
+            for (int i = 0; i < num_workers; i++) {
+                if (pids[i] > 0) kill(pids[i], SIGTERM);
+            }
+
+            /* Wait up to 3 s for graceful shutdown, then SIGKILL */
+            time_t dl = time(NULL) + 3;
+            while (time(NULL) < dl) {
+                int alive = 0;
+                for (int i = 0; i < num_workers; i++) {
+                    if (pids[i] <= 0) continue;
+                    int st;
+                    if (waitpid(pids[i], &st, WNOHANG) > 0) pids[i] = 0;
+                    else alive++;
+                }
+                if (!alive) break;
+                fr_usleep_10ms();
+            }
+            for (int i = 0; i < num_workers; i++) {
+                if (pids[i] > 0) {
+                    kill(pids[i], SIGKILL);
+                    int st; waitpid(pids[i], &st, 0);
+                }
+            }
+
+            /* Release resources before exec */
+            munmap(pub, sizeof(fr_named_shm_t));
+            shm_unlink(shm_name);
+            munmap(shm_base, shm_size);
+            fr_close_socket(server_fd);
+            efree(pids);
+
+            /* Re-execute as a brand-new PHP process (loads fresh bytecode) */
+            if (fr_exec_argv) {
+                execv(fr_exec_argv[0], fr_exec_argv);
+            }
+
+            fprintf(stderr,
+                "[Flames Ready] execv failed: %s\n", strerror(errno));
+            fflush(stderr);
+            _exit(1);
         }
 
         int target = (int)shdr->requested_workers;
