@@ -26,6 +26,15 @@
 #include "SAPI.h"
 #include "php_variables.h"
 
+/* PHP 8.5 renamed UPLOAD_ERR_* to PHP_UPLOAD_ERROR_*; define the old names
+   as fallbacks so the code compiles on both old and new versions. */
+#ifndef UPLOAD_ERR_OK
+#  define UPLOAD_ERR_OK         0
+#endif
+#ifndef UPLOAD_ERR_CANT_WRITE
+#  define UPLOAD_ERR_CANT_WRITE 7
+#endif
+
 #include "flames_ready_platform.h"
 #include "flames_ready_fcgi.h"
 

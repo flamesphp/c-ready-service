@@ -86,7 +86,7 @@ ZEND_END_MODULE_GLOBALS(flames_ready)
 
 #define FLAMES_READY_G(v) ZEND_MODULE_GLOBALS_ACCESSOR(flames_ready, v)
 
-#if defined(ZTS) && defined(COMPILE_DL_FLAMES_READY)
+#if defined(ZTS) && defined(COMPILE_DL_CFLAMES_READY_SERVICE)
 ZEND_TSRMLS_CACHE_EXTERN()
 #endif
 

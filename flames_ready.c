@@ -1295,7 +1295,7 @@ PHP_FUNCTION(__flames_c_ready_service_version__)
 
 PHP_GINIT_FUNCTION(flames_ready)
 {
-#if defined(COMPILE_DL_FLAMES_READY) && defined(ZTS)
+#if defined(COMPILE_DL_CFLAMES_READY_SERVICE) && defined(ZTS)
     ZEND_TSRMLS_CACHE_UPDATE();
 #endif
     flames_ready_globals->reset_callbacks = NULL;
@@ -1332,6 +1332,19 @@ PHP_GSHUTDOWN_FUNCTION(flames_ready)
         &flames_ready_globals->load_count,
         &flames_ready_globals->load_cap);
 }
+
+/* Forward declarations for method tables defined later in this file */
+static const zend_function_entry flames_ready_service_methods[];
+static const zend_function_entry flames_ready_service_worker_methods[];
+static const zend_function_entry flames_ready_service_supervisor_methods[];
+static const zend_function_entry flames_ready_service_register_methods[];
+static const zend_function_entry flames_ready_service_config_methods[];
+
+zend_class_entry *flames_ready_service_ce            = NULL;
+zend_class_entry *flames_ready_service_worker_ce     = NULL;
+zend_class_entry *flames_ready_service_supervisor_ce = NULL;
+zend_class_entry *flames_ready_service_register_ce   = NULL;
+zend_class_entry *flames_ready_service_config_ce     = NULL;
 
 PHP_MINIT_FUNCTION(flames_ready)
 {
@@ -1386,7 +1399,7 @@ PHP_MSHUTDOWN_FUNCTION(flames_ready)
 
 PHP_RINIT_FUNCTION(flames_ready)
 {
-#if defined(COMPILE_DL_FLAMES_READY) && defined(ZTS)
+#if defined(COMPILE_DL_CFLAMES_READY_SERVICE) && defined(ZTS)
     ZEND_TSRMLS_CACHE_UPDATE();
 #endif
     return SUCCESS;
@@ -1451,12 +1464,6 @@ static const zend_function_entry flames_ready_global_functions[] = {
  * Class entries and method tables
  * ========================================================================= */
 
-zend_class_entry *flames_ready_service_ce            = NULL;
-zend_class_entry *flames_ready_service_worker_ce     = NULL;
-zend_class_entry *flames_ready_service_supervisor_ce = NULL;
-zend_class_entry *flames_ready_service_register_ce   = NULL;
-zend_class_entry *flames_ready_service_config_ce     = NULL;
-
 static const zend_function_entry flames_ready_service_methods[] = {
     PHP_ME(FlamesReadyService, isReady,  arginfo_Service_isReady,  ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     PHP_FE_END
@@ -1512,7 +1519,7 @@ zend_module_entry cflames_ready_service_module_entry = {
     STANDARD_MODULE_PROPERTIES_EX
 };
 
-#ifdef COMPILE_DL_FLAMES_READY
+#ifdef COMPILE_DL_CFLAMES_READY_SERVICE
 #   ifdef ZTS
 ZEND_TSRMLS_CACHE_DEFINE()
 #   endif
