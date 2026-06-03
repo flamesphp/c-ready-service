@@ -1,17 +1,3 @@
-/*
- * flames_ready_fcgi.c
- *
- * Minimal FastCGI server used by xflames_ready_handle_request().
- *
- * Apache talks to this worker via mod_proxy_fcgi → Unix/TCP socket.
- * Because the PHP-CLI process never restarts, static class properties
- * and any PHP-level state survive across requests — exactly like
- * FrankenPHP's worker mode.
- *
- * Platform support: Linux, macOS, Windows (PHP 8.5+, WinSock2).
- * On Windows only TCP sockets are supported (no AF_UNIX).
- */
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -26,8 +12,6 @@
 #include "SAPI.h"
 #include "php_variables.h"
 
-/* PHP 8.5 renamed UPLOAD_ERR_* to PHP_UPLOAD_ERROR_*; define the old names
-   as fallbacks so the code compiles on both old and new versions. */
 #ifndef UPLOAD_ERR_OK
 #  define UPLOAD_ERR_OK         0
 #endif
@@ -37,10 +21,6 @@
 
 #include "flames_ready_platform.h"
 #include "flames_ready_fcgi.h"
-
-/* =========================================================================
- * Internal FastCGI record layout
- * ========================================================================= */
 
 typedef struct {
     uint8_t  version;
@@ -52,10 +32,6 @@ typedef struct {
     uint8_t  paddingLength;
     uint8_t  reserved;
 } fcgi_header_t;
-
-/* =========================================================================
- * Low-level I/O helpers
- * ========================================================================= */
 
 static int fcgi_read_exact(fr_socket_t fd, void *buf, size_t n)
 {
@@ -81,15 +57,6 @@ static int fcgi_write_exact(fr_socket_t fd, const void *buf, size_t n)
     return 0;
 }
 
-/* =========================================================================
- * FastCGI name-value pair parser
- * ========================================================================= */
-
-/*
- * Decode a FastCGI length field (1 or 4 bytes).
- * Advances *pos by the number of bytes consumed.
- * Returns -1 if the buffer is too short.
- */
 static int fcgi_decode_len(
     const uint8_t *buf, size_t buf_len,
     size_t *pos, uint32_t *out)
@@ -108,10 +75,6 @@ static int fcgi_decode_len(
     return 0;
 }
 
-/*
- * Parse all name-value pairs from a FCGI_PARAMS content buffer
- * and insert them into the HashTable *ht.
- */
 static void fcgi_parse_params(
     const uint8_t *buf, size_t len, HashTable *ht)
 {
@@ -134,15 +97,9 @@ static void fcgi_parse_params(
     }
 }
 
-/* =========================================================================
- * Socket management
- * ========================================================================= */
-
 fr_socket_t flames_ready_fcgi_open_socket(const char *path)
 {
     fr_socket_t fd;
-
-    /* Numeric string → TCP socket on 0.0.0.0:port */
     if (path[0] >= '0' && path[0] <= '9') {
         int port = atoi(path);
         fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -170,19 +127,16 @@ fr_socket_t flames_ready_fcgi_open_socket(const char *path)
         }
     } else {
 #ifdef _WIN32
-        /* Unix domain sockets require Windows 10 1809+ and a valid FS path.
-         * Fall back to an error: use a TCP port number on Windows. */
         fprintf(stderr,
             "[Flames Ready] Unix sockets are not supported on Windows. "
             "Set flames_ready_service.socket to a TCP port number (e.g. 9000).\n");
         fflush(stderr);
         return FR_INVALID_SOCKET;
 #else
-        /* Unix socket */
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd == FR_INVALID_SOCKET) return FR_INVALID_SOCKET;
 
-        fr_unlink(path); /* remove stale socket */
+        fr_unlink(path);
 
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
@@ -193,7 +147,6 @@ fr_socket_t flames_ready_fcgi_open_socket(const char *path)
             fr_close_socket(fd); return FR_INVALID_SOCKET;
         }
 
-        /* Allow Apache (running as a different user) to connect */
         chmod(path, 0777);
 #endif
     }
@@ -213,10 +166,6 @@ fr_socket_t flames_ready_fcgi_accept(fr_socket_t server_fd)
     } while (conn == FR_INVALID_SOCKET && fr_socket_err() == FR_EINTR);
     return conn;
 }
-
-/* =========================================================================
- * Request reading
- * ========================================================================= */
 
 int flames_ready_fcgi_read_request(fr_socket_t conn_fd, flames_ready_fcgi_request_t *req)
 {
@@ -289,10 +238,6 @@ int flames_ready_fcgi_read_request(fr_socket_t conn_fd, flames_ready_fcgi_reques
     return 0;
 }
 
-/* =========================================================================
- * Minimal URL-decode + query-string parser
- * ========================================================================= */
-
 static char *fr_url_decode(const char *str, size_t len, size_t *out_len)
 {
     char  *result = emalloc(len + 1);
@@ -358,11 +303,6 @@ static void fr_parse_query(const char *qs, size_t qs_len, zval *arr)
     }
 }
 
-/* =========================================================================
- * Multipart/form-data helpers
- * ========================================================================= */
-
-/* Binary-safe substring search (portable memmem). */
 static const char *fr_memmem(const char *hay, size_t hlen,
                                const char *needle, size_t nlen)
 {
@@ -381,7 +321,6 @@ static const char *fr_memmem(const char *hay, size_t hlen,
     return NULL;
 }
 
-/* Case-insensitive substring search within hlen bytes. */
 static const char *fr_memcasestr(const char *hay, size_t hlen,
                                    const char *needle)
 {
@@ -394,7 +333,6 @@ static const char *fr_memcasestr(const char *hay, size_t hlen,
     return NULL;
 }
 
-/* Extract a parameter value from a header string. */
 static char *fr_extract_param(const char *header, const char *param_name)
 {
     size_t      plen = strlen(param_name);
@@ -420,12 +358,6 @@ static char *fr_extract_param(const char *header, const char *param_name)
     return NULL;
 }
 
-/*
- * Parse a multipart/form-data body.
- *
- * Text fields  → inserted into post_arr  ($_POST)
- * File fields  → written to temp files, entry inserted into files_arr ($_FILES)
- */
 static void fr_parse_multipart(
     const char *body, size_t body_len,
     const char *boundary, size_t boundary_len,
@@ -486,7 +418,6 @@ static void fr_parse_multipart(
 
         if (name) {
             if (filename) {
-                /* ── File upload ──────────────────────────────────────────── */
                 char tmp_path[PATH_MAX];
                 int  tmp_fd     = -1;
                 int  error_code = UPLOAD_ERR_OK;
@@ -565,7 +496,6 @@ static void fr_parse_multipart(
                 zend_hash_str_update(Z_ARRVAL_P(files_arr),
                                      name, strlen(name), &fe);
             } else {
-                /* ── Text field → $_POST ──────────────────────────────────── */
                 zval zv;
                 ZVAL_STRINGL(&zv, part_body, part_body_len);
                 zend_hash_str_update(Z_ARRVAL_P(post_arr),
@@ -588,10 +518,6 @@ static void fr_parse_multipart(
     efree(delim);
 }
 
-/* =========================================================================
- * PHP superglobal population
- * ========================================================================= */
-
 void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
 {
     zval sv, gv, pv, cv, rv, fv;
@@ -602,7 +528,6 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
     array_init(&rv);
     array_init(&fv);
 
-    /* ── $_SERVER: all FastCGI params ───────────────────────────────── */
     zend_string *k;
     zval        *v;
     ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL(req->params), k, v) {
@@ -613,14 +538,12 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
         }
     } ZEND_HASH_FOREACH_END();
 
-    /* ── $_GET ──────────────────────────────────────────────────────── */
     zval *qs_zv = zend_hash_str_find(Z_ARRVAL(req->params),
                                       "QUERY_STRING", sizeof("QUERY_STRING") - 1);
     if (qs_zv && Z_TYPE_P(qs_zv) == IS_STRING && Z_STRLEN_P(qs_zv) > 0) {
         fr_parse_query(Z_STRVAL_P(qs_zv), Z_STRLEN_P(qs_zv), &gv);
     }
 
-    /* ── Content-Type ───────────────────────────────────────────────── */
     zval *ct_zv = zend_hash_str_find(Z_ARRVAL(req->params),
                                       "CONTENT_TYPE", sizeof("CONTENT_TYPE") - 1);
     const char *content_type = (ct_zv && Z_TYPE_P(ct_zv) == IS_STRING)
@@ -628,7 +551,6 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
 
     SG(request_info).content_type = content_type;
 
-    /* ── $_POST and $_FILES ─────────────────────────────────────────── */
     if (req->body_len > 0) {
         if (fr_strncasecmp(content_type, "multipart/form-data", 19) == 0) {
             char *boundary = fr_extract_param(content_type, "boundary");
@@ -645,7 +567,6 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
         }
     }
 
-    /* ── php://input ────────────────────────────────────────────────────── */
     if (SG(request_info).request_body) {
         php_stream_close(SG(request_info).request_body);
         SG(request_info).request_body = NULL;
@@ -657,7 +578,6 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
         SG(request_info).request_body = bs;
     }
 
-    /* ── $_COOKIE ───────────────────────────────────────────────────── */
     zval *hc_zv = zend_hash_str_find(Z_ARRVAL(req->params),
                                       "HTTP_COOKIE", sizeof("HTTP_COOKIE") - 1);
     if (hc_zv && Z_TYPE_P(hc_zv) == IS_STRING && Z_STRLEN_P(hc_zv) > 0) {
@@ -689,7 +609,6 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
         }
     }
 
-    /* ── $_REQUEST = COOKIE + POST + GET ────────────────────────────── */
     zend_hash_merge(Z_ARRVAL(rv), Z_ARRVAL(cv), zval_add_ref, 0);
     zend_hash_merge(Z_ARRVAL(rv), Z_ARRVAL(pv), zval_add_ref, 0);
     zend_hash_merge(Z_ARRVAL(rv), Z_ARRVAL(gv), zval_add_ref, 0);
@@ -716,10 +635,6 @@ void flames_ready_fcgi_populate_globals(flames_ready_fcgi_request_t *req)
                                       "REQUEST_URI", sizeof("REQUEST_URI") - 1);
     SG(request_info).request_uri = ru_zv ? Z_STRVAL_P(ru_zv) : "/";
 }
-
-/* =========================================================================
- * Response sending
- * ========================================================================= */
 
 static int fcgi_write_record(fr_socket_t fd, uint8_t type, uint16_t req_id,
                               const char *data, uint16_t len)
@@ -773,10 +688,6 @@ int flames_ready_fcgi_send_response(
     return rc;
 }
 
-/* =========================================================================
- * Streaming / passthrough helpers
- * ========================================================================= */
-
 int flames_ready_fcgi_begin_stream(
     fr_socket_t conn_fd, uint16_t request_id,
     const char *headers, size_t headers_len,
@@ -828,10 +739,6 @@ int flames_ready_fcgi_end_stream(fr_socket_t conn_fd, uint16_t request_id)
     return fcgi_write_record(conn_fd, FCGI_END_REQUEST, request_id,
                               (char *)end_body, sizeof(end_body));
 }
-
-/* =========================================================================
- * Cleanup
- * ========================================================================= */
 
 void flames_ready_fcgi_request_free(flames_ready_fcgi_request_t *req)
 {

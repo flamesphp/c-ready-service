@@ -1,39 +1,3 @@
-/*
- * Flames Ready - PHP Extension
- *
- * Enables FrankenPHP-style persistent worker behaviour inside a
- * standard Apache + PHP-FPM (or mod_php) stack:
- *
- *   - \Flames\Ready\Ready\Service\Register::load('Class', 'method')
- *       Registers a static method that is called ONCE when the worker
- *       process becomes active (bootstraps the application).
- *
- *   - \Flames\Ready\Ready\Service\Register::reset('Class', 'method')
- *       Registers a static method that is called AFTER every handled
- *       request to wipe per-request state (globals, caches, etc.).
- *
- *   - \Flames\Ready\Ready\Service\Register::request(callable $handler): int
- *       Starts the persistent FastCGI supervisor/worker loop (blocking).
- *       Enters the worker loop: invokes load callbacks once, then loops
- *       calling $handler() and reset callbacks until $handler returns
- *       false or max_requests is reached.  Returns total requests handled.
- *
- * Lifecycle integration with Apache / PHP-FPM:
- *   RINIT  – load callbacks are invoked automatically on the first
- *            request of each worker process (when preload_once = On).
- *   RSHUTDOWN – reset callbacks are invoked automatically after every
- *               request in non-worker-mode.
- *
- * INI settings:
- *   flames_ready_service.worker_mode  = 0|1  (default 0)
- *   flames_ready_service.preload_once = 0|1  (default 1)
- *   flames_ready_service.max_requests = N    (default 0 = unlimited)
- *
- * Platform support: Linux, macOS, Windows (PHP 8.5+).
- *   On Windows the supervisor/worker multi-process model is replaced by
- *   a single-worker loop in the calling process (no fork available).
- */
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -51,23 +15,11 @@
 #include "zend_smart_str.h"
 #include "zend_execute.h"
 
-/* =========================================================================
- * Module globals
- * ========================================================================= */
-
 ZEND_DECLARE_MODULE_GLOBALS(flames_ready)
-
-/* =========================================================================
- * Saved argv for exec-based supervisor reload (POSIX only)
- * ========================================================================= */
 #ifndef _WIN32
 static char   fr_php_exe[4096] = "";
 static char **fr_exec_argv     = NULL;
 #endif
-
-/* =========================================================================
- * INI entries
- * ========================================================================= */
 
 PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY(
@@ -99,10 +51,6 @@ PHP_INI_BEGIN()
         PHP_INI_ALL, OnUpdateLong,
         worker_timeout, zend_flames_ready_globals, flames_ready_globals)
 PHP_INI_END()
-
-/* =========================================================================
- * Internal helpers
- * ========================================================================= */
 
 static void flames_ready_free_callbacks(
     flames_ready_callback **cbs,
@@ -172,33 +120,19 @@ static int flames_ready_invoke_callbacks(
     return SUCCESS;
 }
 
-/* =========================================================================
- * PHP functions
- * ========================================================================= */
-
-/* =========================================================================
- * Shared-memory layout – supervisor + all workers see the same region.
- *
- *  [ fr_shared_header_t ][ fr_worker_slot_t × N ]
- *
- * ========================================================================= */
 typedef struct {
-    volatile uint32_t reload_gen;        /* incremented by Supervisor::reloadWorkers()  */
-    volatile pid_t    supervisor_pid;    /* PID of the supervisor process               */
-    volatile int32_t  num_workers;       /* number of worker slots allocated            */
-    volatile int32_t  requested_workers; /* target worker count (Config::setWorkers)    */
+    volatile uint32_t reload_gen;
+    volatile pid_t    supervisor_pid;
+    volatile int32_t  num_workers;
+    volatile int32_t  requested_workers;
     uint32_t          _pad;
 } fr_shared_header_t;
 
 typedef struct {
     volatile pid_t  pid;
-    volatile time_t worker_started;  /* epoch when child was born         */
-    volatile time_t request_started; /* epoch when current req began; 0=idle */
+    volatile time_t worker_started;
+    volatile time_t request_started;
 } fr_worker_slot_t;
-
-/* =========================================================================
- * Worker accept loop
- * ========================================================================= */
 
 static int flames_ready_handle_one(fr_socket_t conn_fd, zval *handler)
 {
@@ -244,7 +178,6 @@ static int flames_ready_handle_one(fr_socket_t conn_fd, zval *handler)
         zval_ptr_dtor(&swc_ret);
     }
 
-    /* ── Passthrough path ─────────────────────────────────────────────── */
     if (FLAMES_READY_G(passthrough_mode)) {
         FLAMES_READY_G(passthrough_conn_fd) = FR_INVALID_SOCKET;
 
@@ -292,7 +225,6 @@ static int flames_ready_handle_one(fr_socket_t conn_fd, zval *handler)
         return 0;
     }
 
-    /* ── Normal (buffered) path ─────────────────────────────────────── */
     zval ob_content;
     ZVAL_UNDEF(&ob_content);
     php_output_get_contents(&ob_content);
@@ -407,8 +339,6 @@ static void flames_ready_worker_loop(fr_socket_t server_fd, zval *handler,
 
     FR_IGNORE_SIGPIPE();
 
-    /* Set server_fd non-blocking so accept() returns immediately when another
-     * worker claimed the connection (POSIX) or when no connections are ready. */
     fr_set_nonblocking(server_fd, 1);
 
     if (slot) {
@@ -442,7 +372,6 @@ static void flames_ready_worker_loop(fr_socket_t server_fd, zval *handler,
 
         fr_socket_t conn_fd = FR_INVALID_SOCKET;
         while (conn_fd == FR_INVALID_SOCKET) {
-            /* TTL check */
             if (ttl > 0 && slot) {
                 time_t elapsed = time(NULL) - slot->worker_started;
                 if (elapsed >= (time_t)ttl) {
@@ -477,7 +406,6 @@ static void flames_ready_worker_loop(fr_socket_t server_fd, zval *handler,
                 fr_usleep_10ms();
                 conn_fd = FR_INVALID_SOCKET;
             } else {
-                /* Accepted socket must be blocking for read/write to work. */
                 fr_set_nonblocking(conn_fd, 0);
             }
         }
@@ -517,17 +445,13 @@ worker_exit:
     if (slot) { slot->request_started = 0; slot->pid = 0; }
 }
 
-/* =========================================================================
- * POSIX named shared memory helpers
- * ========================================================================= */
-
 #define FR_NAMED_SHM_MAX_WORKERS 512
 
 typedef struct {
     volatile pid_t    supervisor_pid;
     volatile int32_t  num_workers;
     volatile int32_t  requested_workers;
-    volatile uint32_t reload_gen;          /* external processes write here to trigger reload */
+    volatile uint32_t reload_gen;
     volatile pid_t    worker_pids[FR_NAMED_SHM_MAX_WORKERS];
 } fr_named_shm_t;
 
@@ -535,7 +459,6 @@ static const char *flames_ready_socket_path(void)
 {
     const char *p = FLAMES_READY_G(socket_path);
 #ifdef _WIN32
-    /* On Windows, Unix socket paths are not supported; default to TCP */
     if (!p || !p[0] || p[0] == '/') return "9000";
 #endif
     return (p && p[0]) ? p : "/var/run/flames-ready/worker.sock";
@@ -558,7 +481,6 @@ static void flames_ready_shm_name(const char *sock_path,
     buf[len] = '\0';
 }
 
-/* ── Open named shm (read-only) ─────────────────────────────────────────── */
 static fr_named_shm_t *flames_ready_named_shm_open_ro(void)
 {
     char shm_name[256];
@@ -581,7 +503,6 @@ static fr_named_shm_t *flames_ready_named_shm_open_ro(void)
 #endif
 }
 
-/* ── Open named shm (read-write) ─────────────────────────────────────────── */
 static fr_named_shm_t *flames_ready_named_shm_open_rw(void)
 {
     char shm_name[256];
@@ -604,7 +525,6 @@ static fr_named_shm_t *flames_ready_named_shm_open_rw(void)
 #endif
 }
 
-/* ── Helper: check if a named shm pointer represents failure ─────────────── */
 static int fr_named_shm_is_failed(fr_named_shm_t *p)
 {
 #ifdef _WIN32
@@ -623,10 +543,6 @@ static void flames_ready_named_shm_update_workers(fr_named_shm_t *pub,
     }
 }
 
-/* =========================================================================
- * Output-buffer callback used in passthrough mode.
- * ========================================================================= */
-
 static int flames_ready_stream_ob_handler(void **handler_context,
                                            php_output_context *output_context)
 {
@@ -643,10 +559,6 @@ static int flames_ready_stream_ob_handler(void **handler_context,
     output_context->out.free = 0;
     return SUCCESS;
 }
-
-/* =========================================================================
- * PHP method: Worker::passthrough
- * ========================================================================= */
 
 PHP_METHOD(FlamesReadyServiceWorker, passthrough)
 {
@@ -715,20 +627,14 @@ PHP_METHOD(FlamesReadyServiceWorker, passthrough)
     RETURN_NULL();
 }
 
-/* =========================================================================
- * PHP method: Supervisor::reloadWorkers
- * ========================================================================= */
-
 PHP_METHOD(FlamesReadyServiceSupervisor, reloadWorkers)
 {
     ZEND_PARSE_PARAMETERS_NONE();
 
     fr_shared_header_t *shdr = (fr_shared_header_t *)FLAMES_READY_G(shared_header);
     if (shdr) {
-        /* Called from within the supervisor process: update private shm directly */
         shdr->reload_gen++;
 
-        /* Also mirror to named shm so the value stays consistent */
         fr_named_shm_t *pub = flames_ready_named_shm_open_rw();
         if (!fr_named_shm_is_failed(pub)) {
             pub->reload_gen = shdr->reload_gen;
@@ -739,11 +645,8 @@ PHP_METHOD(FlamesReadyServiceSupervisor, reloadWorkers)
             "[Flames Ready] reload requested by pid %d (gen→%u)\n",
             fr_getpid(), shdr->reload_gen);
     } else {
-        /* Called from an external process: write to the named shm;
-         * the supervisor will propagate to private shm on its next tick. */
         fr_named_shm_t *pub = flames_ready_named_shm_open_rw();
         if (fr_named_shm_is_failed(pub)) {
-            /* No running supervisor – nothing to reload */
             RETURN_FALSE;
         }
         pub->reload_gen++;
@@ -756,10 +659,6 @@ PHP_METHOD(FlamesReadyServiceSupervisor, reloadWorkers)
     fflush(stderr);
     RETURN_NULL();
 }
-
-/* =========================================================================
- * PHP method: Register::request  (= the main entry point – starts the loop)
- * ========================================================================= */
 
 static void flames_ready_start(zval *handler, zval *return_value);
 
@@ -774,10 +673,6 @@ PHP_METHOD(FlamesReadyServiceRegister, request)
     flames_ready_start(handler, return_value);
 }
 
-/* =========================================================================
- * flames_ready_start – starts the supervisor/worker loop (blocking)
- * ========================================================================= */
-
 static void flames_ready_start(zval *handler, zval *return_value)
 {
     if (!zend_is_callable(handler, 0, NULL)) {
@@ -788,7 +683,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
 
     const char *sock_path = flames_ready_socket_path();
 
-    /* Open the FastCGI listening socket */
     fr_socket_t server_fd = FR_INVALID_SOCKET;
     int bind_tries = 30;
     while (bind_tries-- > 0) {
@@ -805,19 +699,10 @@ static void flames_ready_start(zval *handler, zval *return_value)
         RETURN_FALSE;
     }
 
-    /* Derive the named-shm identifier from the socket path */
     char shm_name[256];
     flames_ready_shm_name(sock_path, shm_name, sizeof(shm_name));
 
 #ifdef _WIN32
-    /* ── Windows: single-worker mode ─────────────────────────────────────
-     *
-     * fork() is unavailable on Windows.  This process is simultaneously
-     * the supervisor and the sole worker.  We publish our PID via a
-     * Windows named file mapping so external code can inspect the state.
-     */
-
-    /* Create or open the named shared memory */
     HANDLE win_shm_handle = CreateFileMappingA(
         INVALID_HANDLE_VALUE, NULL,
         PAGE_READWRITE,
@@ -869,7 +754,7 @@ static void flames_ready_start(zval *handler, zval *return_value)
     pub->worker_pids[0]    = (pid_t)fr_getpid();
 
     FLAMES_READY_G(is_supervisor) = 1;
-    FLAMES_READY_G(shared_header) = NULL; /* no anonymous shm on Windows */
+    FLAMES_READY_G(shared_header) = NULL;
 
     fprintf(stderr,
         "[Flames Ready] supervisor pid %d – 1 worker (single-process mode)"
@@ -877,7 +762,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
         fr_getpid(), sock_path);
     fflush(stderr);
 
-    /* Run the worker loop in this process */
     flames_ready_worker_loop(server_fd, handler, NULL, 0);
 
     UnmapViewOfFile(pub);
@@ -886,9 +770,7 @@ static void flames_ready_start(zval *handler, zval *return_value)
 
     RETURN_LONG(FLAMES_READY_G(request_count));
 
-#else /* POSIX: multi-process supervisor + worker model ─────────────────── */
-
-    /* Guard against duplicate supervisors via named shared memory (atomic) */
+#else
     int shm_fd = shm_open(shm_name, O_CREAT | O_EXCL | O_RDWR, 0600);
     if (shm_fd < 0) {
         if (errno != EEXIST) {
@@ -959,7 +841,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
     }
     memset(pub, 0, sizeof(fr_named_shm_t));
 
-    /* Save PHP binary + argv so we can exec() ourselves on reload */
     if (fr_exec_argv == NULL) {
         ssize_t exelen = readlink("/proc/self/exe",
                                   fr_php_exe, sizeof(fr_php_exe) - 1);
@@ -967,7 +848,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
 
         int    sargc = SG(request_info).argc;
         char **sargv = SG(request_info).argv;
-        /* build: [ php_binary, sargv[0], sargv[1], ..., NULL ] */
         fr_exec_argv = malloc((sargc + 2) * sizeof(char *));
         if (fr_exec_argv) {
             fr_exec_argv[0] = strdup(fr_php_exe[0] ? fr_php_exe : "php");
@@ -977,7 +857,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
         }
     }
 
-    /* Determine worker count */
     int num_workers = (int)FLAMES_READY_G(workers);
     if (num_workers <= 0) {
         long cpus = sysconf(_SC_NPROCESSORS_ONLN);
@@ -987,7 +866,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
     zend_long ttl     = FLAMES_READY_G(worker_ttl);
     zend_long timeout = FLAMES_READY_G(worker_timeout);
 
-    /* Allocate anonymous shared memory: header + worker slots */
     size_t shm_size = sizeof(fr_shared_header_t)
                     + FR_NAMED_SHM_MAX_WORKERS * sizeof(fr_worker_slot_t);
     void *shm_base = mmap(NULL, shm_size,
@@ -1017,7 +895,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
                                         ? num_workers : FR_NAMED_SHM_MAX_WORKERS);
     pub->requested_workers = pub->num_workers;
 
-    /* Fork all initial workers */
     pid_t *pids = emalloc(FR_NAMED_SHM_MAX_WORKERS * sizeof(pid_t));
     memset(pids, 0, FR_NAMED_SHM_MAX_WORKERS * sizeof(pid_t));
     for (int i = 0; i < num_workers; i++) {
@@ -1046,13 +923,10 @@ static void flames_ready_start(zval *handler, zval *return_value)
         (long)ttl, (long)timeout);
     fflush(stderr);
 
-    /* Supervisor loop */
     while (1) {
         sleep(1);
         time_t now = time(NULL);
 
-        /* Reload requested by external process – re-exec supervisor so workers
-         * start as fresh PHP processes and pick up changed source files.       */
         if (pub->reload_gen != shdr->reload_gen) {
             uint32_t new_gen = pub->reload_gen;
             fprintf(stderr,
@@ -1060,12 +934,10 @@ static void flames_ready_start(zval *handler, zval *return_value)
                 new_gen);
             fflush(stderr);
 
-            /* Signal all workers to exit */
             for (int i = 0; i < num_workers; i++) {
                 if (pids[i] > 0) kill(pids[i], SIGTERM);
             }
 
-            /* Wait up to 3 s for graceful shutdown, then SIGKILL */
             time_t dl = time(NULL) + 3;
             while (time(NULL) < dl) {
                 int alive = 0;
@@ -1085,14 +957,12 @@ static void flames_ready_start(zval *handler, zval *return_value)
                 }
             }
 
-            /* Release resources before exec */
             munmap(pub, sizeof(fr_named_shm_t));
             shm_unlink(shm_name);
             munmap(shm_base, shm_size);
             fr_close_socket(server_fd);
             efree(pids);
 
-            /* Re-execute as a brand-new PHP process (loads fresh bytecode) */
             if (fr_exec_argv) {
                 execv(fr_exec_argv[0], fr_exec_argv);
             }
@@ -1179,7 +1049,6 @@ static void flames_ready_start(zval *handler, zval *return_value)
         }
     }
 
-    /* Unreachable in normal operation */
     munmap(pub, sizeof(fr_named_shm_t));
     shm_unlink(shm_name);
     FLAMES_READY_G(shared_header) = NULL;
@@ -1187,12 +1056,8 @@ static void flames_ready_start(zval *handler, zval *return_value)
     fr_close_socket(server_fd);
     efree(pids);
     RETURN_LONG(0);
-#endif /* _WIN32 */
+#endif
 }
-
-/* =========================================================================
- * Remaining PHP methods
- * ========================================================================= */
 
 PHP_METHOD(FlamesReadyService, isReady)
 {
@@ -1269,10 +1134,6 @@ PHP_METHOD(FlamesReadyServiceSupervisor, getPid)
     RETURN_LONG((zend_long)pid);
 }
 
-/* =========================================================================
- * \Flames\Ready\Ready\Service\Register
- * ========================================================================= */
-
 PHP_METHOD(FlamesReadyServiceRegister, load)
 {
     char   *class_name,  *method_name;
@@ -1317,10 +1178,6 @@ PHP_METHOD(FlamesReadyServiceRegister, reset)
     RETURN_TRUE;
 }
 
-/* =========================================================================
- * \Flames\Ready\Ready\Service\Config
- * ========================================================================= */
-
 PHP_METHOD(FlamesReadyServiceConfig, setWorkers)
 {
     zend_long n;
@@ -1347,20 +1204,11 @@ PHP_METHOD(FlamesReadyServiceConfig, setWorkers)
     }
 }
 
-/* =========================================================================
- * Global function: __flames_c_ready_service_version__
- * Returns the service version string embedded from config.yml at build time.
- * ========================================================================= */
-
 PHP_FUNCTION(__flames_c_ready_service_version__)
 {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_STRING(PHP_FLAMES_READY_SERVICE_VERSION);
 }
-
-/* =========================================================================
- * Module lifecycle
- * ========================================================================= */
 
 PHP_GINIT_FUNCTION(flames_ready)
 {
@@ -1402,7 +1250,6 @@ PHP_GSHUTDOWN_FUNCTION(flames_ready)
         &flames_ready_globals->load_cap);
 }
 
-/* Forward declarations for method tables defined later in this file */
 static const zend_function_entry flames_ready_service_methods[];
 static const zend_function_entry flames_ready_service_worker_methods[];
 static const zend_function_entry flames_ready_service_supervisor_methods[];
@@ -1519,19 +1366,11 @@ PHP_MINFO_FUNCTION(flames_ready)
     DISPLAY_INI_ENTRIES();
 }
 
-/* =========================================================================
- * Global function table
- * ========================================================================= */
-
 static const zend_function_entry flames_ready_global_functions[] = {
     PHP_FE(__flames_c_ready_service_version__,
            arginfo___flames_c_ready_service_version__)
     PHP_FE_END
 };
-
-/* =========================================================================
- * Class entries and method tables
- * ========================================================================= */
 
 static const zend_function_entry flames_ready_service_methods[] = {
     PHP_ME(FlamesReadyService, isReady,  arginfo_Service_isReady,  ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
@@ -1564,10 +1403,6 @@ static const zend_function_entry flames_ready_service_config_methods[] = {
     PHP_ME(FlamesReadyServiceConfig, setWorkers, arginfo_Config_setWorkers, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     PHP_FE_END
 };
-
-/* =========================================================================
- * Module entry
- * ========================================================================= */
 
 zend_module_entry cflames_ready_service_module_entry = {
     STANDARD_MODULE_HEADER_EX,

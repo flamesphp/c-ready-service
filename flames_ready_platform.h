@@ -1,32 +1,19 @@
-/*
- * flames_ready_platform.h
- *
- * Platform-specific abstractions – isolates all OS differences so that
- * flames_ready.c and flames_ready_fcgi.c stay portable across Linux,
- * macOS, and Windows (PHP 8.5+).
- */
-
 #ifndef FLAMES_READY_PLATFORM_H
 #define FLAMES_READY_PLATFORM_H
 
-/* =========================================================================
- * Windows
- * ========================================================================= */
 #ifdef _WIN32
 
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
-/* winsock2 must be included before windows.h */
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  include <windows.h>
-#  include <process.h>   /* _getpid, _exit   */
-#  include <io.h>        /* _open, _write, _close, _unlink */
+#  include <process.h>
+#  include <io.h>
 #  include <time.h>
 #  include <limits.h>
 
-/* Socket type */
 typedef SOCKET fr_socket_t;
 #  define FR_INVALID_SOCKET   INVALID_SOCKET
 #  define fr_close_socket(s)  closesocket(s)
@@ -35,7 +22,6 @@ typedef SOCKET fr_socket_t;
 #  define FR_EINTR            WSAEINTR
 #  define FR_EWOULDBLOCK      WSAEWOULDBLOCK
 
-/* select() first-argument is ignored on Windows */
 #  define fr_select_nfds(s)   0
 
 static inline int fr_set_nonblocking(fr_socket_t s, int enable)
@@ -44,7 +30,6 @@ static inline int fr_set_nonblocking(fr_socket_t s, int enable)
     return ioctlsocket(s, FIONBIO, &v) == 0 ? 0 : -1;
 }
 
-/* Socket I/O – Windows sockets use recv/send, not read/write */
 static inline ssize_t fr_sock_read(fr_socket_t fd, void *buf, size_t n)
 {
     int r = recv(fd, (char *)buf, (int)n, 0);
@@ -56,42 +41,24 @@ static inline ssize_t fr_sock_write(fr_socket_t fd, const void *buf, size_t n)
     return w < 0 ? -1 : (ssize_t)w;
 }
 
-/* Timing */
 #  define fr_sleep_s(s)       Sleep((DWORD)(s) * 1000)
 #  define fr_usleep_10ms()    Sleep(10)
-
-/* Process */
 #  define fr_getpid()         ((int)GetCurrentProcessId())
-
-/* File operations */
 #  define fr_unlink(p)        _unlink(p)
-
-/* String comparison */
 #  define fr_strncasecmp(a,b,n)   _strnicmp((a),(b),(n))
-
-/* SIGPIPE does not exist on Windows */
 #  define FR_IGNORE_SIGPIPE()     ((void)0)
-
-/* fork() is not available on Windows; single-worker mode is used */
 #  define FR_NO_FORK 1
-
-/* Shared-memory helpers (Windows file mapping) */
 #  define FR_SHM_FAILED        NULL
 #  define fr_shm_unmap(p,sz)   UnmapViewOfFile(p)
 
-/* ssize_t */
 #  ifndef ssize_t
      typedef SSIZE_T ssize_t;
 #  endif
 
-/* PATH_MAX */
 #  ifndef PATH_MAX
 #    define PATH_MAX MAX_PATH
 #  endif
 
-/* =========================================================================
- * POSIX (Linux / macOS / BSD)
- * ========================================================================= */
 #else
 
 #  include <unistd.h>
@@ -144,6 +111,6 @@ static inline ssize_t fr_sock_write(fr_socket_t fd, const void *buf, size_t n)
 #  define FR_SHM_FAILED           ((void *)MAP_FAILED)
 #  define fr_shm_unmap(p,sz)      munmap((p),(sz))
 
-#endif /* _WIN32 */
+#endif
 
-#endif /* FLAMES_READY_PLATFORM_H */
+#endif
